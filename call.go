@@ -12,9 +12,11 @@ import (
 // ========================= Registro de llamadas =========================
 
 type Call struct {
-	ID   string
-	PC   *webrtc.PeerConnection
-	Done chan struct{}
+	ID           string
+	PC           *webrtc.PeerConnection
+	Done         chan struct{}
+	AudioStarted bool // Prevenir múltiples goroutines de audio
+	AudioMutex   sync.Mutex
 }
 
 var calls sync.Map // map[string]*Call

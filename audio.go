@@ -101,15 +101,28 @@ func setupAudioSender(peer *webrtc.PeerConnection, audioTrans *webrtc.RTPTransce
 	// Drenar RTCP para evitar bloqueo del sender
 	go drainRTCP(audioTrans.Sender())
 
-	// IMPORTANTE: empieza a enviar SOLO cuando la PC está conectada
-	peer.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		if s == webrtc.PeerConnectionStateConnected {
-			log.Printf(">> OUTGOING: conexión lista, comenzando envío OGG (id=%s)", callID)
-			go sendOGGAudio(trackLocal, callID)
-		}
-	})
+	// NOTA: El audio ahora se inicia desde setupPeerCallbacks cuando ICE está conectado
+	// Esto mejora la latencia en ~1-2 segundos comparado con esperar PeerConnectionStateConnected
 
 	return nil
+}
+
+// startAudioSending inicia el envío de audio usando la track ya configurada
+func startAudioSending(track webrtc.TrackLocal, callID string) {
+	if OutOGGPath == "" {
+		log.Printf(">> OUTGOING: No hay archivo OGG configurado (id=%s)", callID)
+		return
+	}
+
+	// Verificar que es una TrackLocalStaticSample
+	trackLocal, ok := track.(*webrtc.TrackLocalStaticSample)
+	if !ok {
+		log.Printf(">> OUTGOING: Track no es StaticSample (id=%s)", callID)
+		return
+	}
+
+	log.Printf(">> OUTGOING: iniciando envío anticipado de OGG='%s' (id=%s)", OutOGGPath, callID)
+	sendOGGAudio(trackLocal, callID)
 }
 
 // sendOGGAudio envía audio desde un archivo OGG

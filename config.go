@@ -10,7 +10,9 @@ var rtcConfig = webrtc.Configuration{
 		{
 			URLs: []string{
 				"stun:stun.l.google.com:19302",
-				"stun:stun.l.google.com:19305",
+				"stun:stun1.l.google.com:19302",
+				"stun:stun2.l.google.com:19302",
+				"stun:stun3.l.google.com:19302",
 			},
 		},
 		// {
@@ -19,6 +21,8 @@ var rtcConfig = webrtc.Configuration{
 		// 	Credential: "pass",
 		// },
 	},
+	// Optimizaciones para reducir latencia de conexión
+	ICECandidatePoolSize: 10, // Pre-gather más candidatos
 }
 
 // Autocolgado por inactividad RTP (0 = deshabilitado)

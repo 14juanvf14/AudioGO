@@ -165,6 +165,26 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 func setupPeerCallbacks(peer *webrtc.PeerConnection, call *Call) {
 	peer.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		log.Printf(">> ICE state: %s (id=%s)", s.String(), call.ID)
+		// OPTIMIZACIÓN: Empezar audio tan pronto como ICE esté conectado
+		if s == webrtc.ICEConnectionStateConnected {
+			call.AudioMutex.Lock()
+			if !call.AudioStarted {
+				call.AudioStarted = true
+				call.AudioMutex.Unlock()
+
+				log.Printf(">> ICE conectado, iniciando envío de audio anticipado (id=%s)", call.ID)
+				// Buscar el transceiver de audio y activar el envío
+				for _, transceiver := range peer.GetTransceivers() {
+					if transceiver.Kind() == webrtc.RTPCodecTypeAudio && transceiver.Sender().Track() != nil {
+						go startAudioSending(transceiver.Sender().Track(), call.ID)
+						break
+					}
+				}
+			} else {
+				call.AudioMutex.Unlock()
+				log.Printf(">> Audio ya iniciado previamente (id=%s)", call.ID)
+			}
+		}
 	})
 
 	peer.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
