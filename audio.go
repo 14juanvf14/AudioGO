@@ -5,9 +5,14 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
 
+	"github.com/hajimehoshi/oto"
+	"github.com/hraban/opus"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"github.com/pion/webrtc/v3/pkg/media/oggreader"
@@ -16,7 +21,136 @@ import (
 
 // ========================= Funciones de Audio =========================
 
-// setupAudioReceiver configura el receptor de audio para guardar en OGG
+// RealTimeAudioPlayer maneja la reproducción de audio en tiempo real
+type RealTimeAudioPlayer struct {
+	context   *oto.Context
+	player    *oto.Player
+	decoder   *opus.Decoder
+	isPlaying bool
+	mutex     sync.RWMutex
+}
+
+// createRealTimePlayer crea un nuevo reproductor de audio en tiempo real
+func createRealTimePlayer() (*RealTimeAudioPlayer, error) {
+	// Configurar el contexto de audio: 48kHz, 2 canales, 16-bit samples, buffer 8192
+	ctx, err := oto.NewContext(48000, 2, 2, 8192)
+	if err != nil {
+		return nil, fmt.Errorf("error creando contexto de audio: %w", err)
+	}
+
+	// Crear decodificador Opus (48kHz, 2 canales)
+	decoder, err := opus.NewDecoder(48000, 2)
+	if err != nil {
+		return nil, fmt.Errorf("error creando decodificador Opus: %w", err)
+	}
+
+	return &RealTimeAudioPlayer{
+		context:   ctx,
+		decoder:   decoder,
+		isPlaying: false,
+	}, nil
+}
+
+// start inicia la reproducción
+func (rtp *RealTimeAudioPlayer) start() error {
+	rtp.mutex.Lock()
+	defer rtp.mutex.Unlock()
+
+	if rtp.isPlaying {
+		return nil // Ya está reproduciendo
+	}
+
+	// Crear un nuevo player
+	rtp.player = rtp.context.NewPlayer()
+	rtp.isPlaying = true
+
+	return nil
+}
+
+// playOpusData decodifica y reproduce datos Opus
+func (rtp *RealTimeAudioPlayer) playOpusData(opusData []byte) error {
+	rtp.mutex.RLock()
+	if !rtp.isPlaying || rtp.player == nil {
+		rtp.mutex.RUnlock()
+		return nil
+	}
+	player := rtp.player
+	rtp.mutex.RUnlock()
+
+	// Decodificar datos Opus a PCM
+	pcmData := make([]int16, 5760) // Buffer para 120ms a 48kHz stereo
+	n, err := rtp.decoder.Decode(opusData, pcmData)
+	if err != nil {
+		return fmt.Errorf("error decodificando Opus: %w", err)
+	}
+
+	// Convertir int16 a bytes (little endian)
+	byteData := make([]byte, n*4) // 2 canales * 2 bytes por sample
+	for i := 0; i < n*2; i++ {
+		sample := pcmData[i]
+		byteData[i*2] = byte(sample & 0xFF)
+		byteData[i*2+1] = byte((sample >> 8) & 0xFF)
+	}
+
+	// Escribir al player
+	_, err = player.Write(byteData)
+	return err
+}
+
+// stop detiene la reproducción
+func (rtp *RealTimeAudioPlayer) stop() {
+	rtp.mutex.Lock()
+	defer rtp.mutex.Unlock()
+
+	if !rtp.isPlaying {
+		return
+	}
+
+	rtp.isPlaying = false
+
+	if rtp.player != nil {
+		rtp.player.Close()
+		rtp.player = nil
+	}
+}
+
+// playAudioFile reproduce un archivo de audio usando el reproductor del sistema
+func playAudioFile(filepath string, callID string) {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin": // macOS
+		// Usar 'open' que abre con la aplicación predeterminada
+		cmd = exec.Command("open", filepath)
+	case "linux":
+		// Intentar varios reproductores comunes en Linux
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			cmd = exec.Command("xdg-open", filepath)
+		} else if _, err := exec.LookPath("ffplay"); err == nil {
+			cmd = exec.Command("ffplay", "-nodisp", "-autoexit", filepath)
+		} else if _, err := exec.LookPath("vlc"); err == nil {
+			cmd = exec.Command("vlc", "--intf", "dummy", "--play-and-exit", filepath)
+		} else {
+			log.Printf(">> No se encontró reproductor de audio compatible en Linux (id=%s)", callID)
+			return
+		}
+	case "windows":
+		// En Windows usar el comando start para abrir con la aplicación predeterminada
+		cmd = exec.Command("cmd", "/c", "start", "", filepath)
+	default:
+		log.Printf(">> Sistema operativo no soportado para reproducción: %s (id=%s)", runtime.GOOS, callID)
+		return
+	}
+
+	log.Printf(">> Ejecutando comando de reproducción: %v (id=%s)", cmd.Args, callID)
+	if err := cmd.Run(); err != nil {
+		log.Printf(">> Error reproduciendo audio: %v (id=%s)", err, callID)
+	} else {
+		log.Printf(">> Reproducción de audio iniciada: %s (id=%s)", filepath, callID)
+	}
+}
+
+// setupAudioReceiver configura el receptor de audio para guardar en OGG y reproducir en tiempo real
 func setupAudioReceiver(peer *webrtc.PeerConnection, callID string) {
 	peer.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		if track.Kind() != webrtc.RTPCodecTypeAudio {
@@ -29,12 +163,39 @@ func setupAudioReceiver(peer *webrtc.PeerConnection, callID string) {
 		abs := filepath.Join(cwd, filename)
 		log.Printf(">> Audio entrante detectado, guardando en: %s (codec=%s) (id=%s)", abs, track.Codec().MimeType, callID)
 
+		// Crear directorio recorder si no existe
+		if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+			log.Printf("error creando directorio: %v (id=%s)", err, callID)
+			return
+		}
+
+		// Configurar grabación en OGG
 		ogg, err := oggwriter.New(abs, 48000, 2)
 		if err != nil {
 			log.Printf("error creando ogg: %v (id=%s)", err, callID)
 			return
 		}
-		defer ogg.Close()
+		defer func() {
+			ogg.Close()
+			log.Printf(">> Grabación finalizada: %s (id=%s)", abs, callID)
+		}()
+
+		// Configurar reproductor en tiempo real
+		rtPlayer, err := createRealTimePlayer()
+		if err != nil {
+			log.Printf("error creando reproductor en tiempo real: %v (id=%s)", err, callID)
+			// Continuar sin reproductor si falla
+		} else {
+			if err := rtPlayer.start(); err != nil {
+				log.Printf("error iniciando reproductor: %v (id=%s)", err, callID)
+			} else {
+				log.Printf(">> Reproductor en tiempo real iniciado (id=%s)", callID)
+				defer func() {
+					rtPlayer.stop()
+					log.Printf(">> Reproductor en tiempo real detenido (id=%s)", callID)
+				}()
+			}
+		}
 
 		// Colgar por inactividad, si está habilitado
 		var timer *time.Timer
@@ -64,10 +225,22 @@ func setupAudioReceiver(peer *webrtc.PeerConnection, callID string) {
 				timer.Reset(time.Duration(IdleHangupSeconds) * time.Second)
 			}
 
-			log.Printf(">> RTP recibido: SSRC=%d Seq=%d TS=%d (id=%s)", pkt.SSRC, pkt.SequenceNumber, pkt.Timestamp, callID)
+			log.Printf(">> RTP recibido: SSRC=%d Seq=%d TS=%d Payload=%d bytes (id=%s)",
+				pkt.SSRC, pkt.SequenceNumber, pkt.Timestamp, len(pkt.Payload), callID)
+
+			// Guardar en OGG
 			if writeErr := ogg.WriteRTP(pkt); writeErr != nil {
 				log.Printf("error escribiendo ogg: %v (id=%s)", writeErr, callID)
 				return
+			}
+
+			// Reproducir en tiempo real si el reproductor está disponible
+			if rtPlayer != nil && rtPlayer.isPlaying {
+				// El payload contiene datos Opus, reproducir directamente
+				if playErr := rtPlayer.playOpusData(pkt.Payload); playErr != nil {
+					log.Printf("error reproduciendo audio en tiempo real: %v (id=%s)", playErr, callID)
+					// No retornar, continuar grabando aunque falle la reproducción
+				}
 			}
 		}
 	})
