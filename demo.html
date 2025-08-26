@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retell AI - Audio Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        
+        .section {
+            background: rgba(255, 255, 255, 0.05);
+            margin: 20px 0;
+            padding: 20px;
+            border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .section h3 {
+            margin-top: 0;
+            color: #ffd700;
+            font-size: 1.3em;
+        }
+        
+        button {
+            background: linear-gradient(45deg, #ff6b6b, #ffa500);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            margin: 5px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        }
+        
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        select {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 10px;
+            border-radius: 10px;
+            margin: 5px;
+            font-size: 14px;
+            min-width: 200px;
+        }
+        
+        select option {
+            background: #333;
+            color: white;
+        }
+        
+        .status {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .indicator.green { background: #4CAF50; }
+        .indicator.red { background: #f44336; }
+        .indicator.yellow { background: #FFC107; }
+        
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Retell AI - Audio System Demo</h1>
+        
+        <div class="section">
+            <h3>📊 Estado del Sistema</h3>
+            <div id="systemStatus">
+                <div><span class="indicator red"></span>Desconectado</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="section">
+                <h3>🎧 Dispositivos de Audio</h3>
+                <button onclick="loadAudioDevices()">🔄 Actualizar Dispositivos</button>
+                
+                <div style="margin-top: 15px;">
+                    <label>🎤 Dispositivo de Entrada:</label><br>
+                    <select id="inputDevices" onchange="setInputDevice()">
+                        <option value="">Seleccionar micrófono...</option>
+                    </select>
+                </div>
+                
+                <div style="margin-top: 15px;">
+                    <label>🔊 Dispositivo de Salida:</label><br>
+                    <select id="outputDevices" onchange="setOutputDevice()">
+                        <option value="">Seleccionar parlantes...</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>🎵 Control de Audio</h3>
+                <div>
+                    <button onclick="startAudioCapture()">🎤 Iniciar Captura</button>
+                    <button onclick="stopAudioCapture()">⏹️ Detener Captura</button>
+                </div>
+                <div>
+                    <button onclick="startAudioPlayback()">🔊 Iniciar Reproducción</button>
+                    <button onclick="stopAudioPlayback()">⏹️ Detener Reproducción</button>
+                </div>
+                <div style="margin-top: 15px;">
+                    <button onclick="getAudioStatus()">📊 Estado de Audio</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>📞 Control de Llamadas Retell AI</h3>
+            <div>
+                <input type="text" id="sessionId" placeholder="ID de Sesión" 
+                       style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); 
+                              color: white; padding: 10px; border-radius: 10px; margin: 5px;" 
+                       value="demo-session-123">
+                <input type="text" id="accessToken" placeholder="Token de Acceso" 
+                       style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); 
+                              color: white; padding: 10px; border-radius: 10px; margin: 5px;" 
+                       value="demo-token">
+            </div>
+            <div>
+                <button onclick="startCall()">📞 Iniciar Llamada</button>
+                <button onclick="stopCall()">📴 Detener Llamada</button>
+                <button onclick="muteCall()">🔇 Silenciar</button>
+                <button onclick="unmuteCall()">🔊 Activar</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>📡 WebSocket - Eventos en Tiempo Real</h3>
+            <button onclick="connectWebSocket()">🔌 Conectar WebSocket</button>
+            <button onclick="disconnectWebSocket()">🔌 Desconectar</button>
+            <div id="websocketStatus" style="margin-top: 10px;">
+                <span class="indicator red"></span>Desconectado
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>📋 Log de Actividad</h3>
+            <button onclick="clearLog()">🗑️ Limpiar Log</button>
+            <div id="activityLog" class="status"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8080';
+        let ws = null;
+        let currentSessionId = null;
+
+        // Utility functions
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logDiv = document.getElementById('activityLog');
+            const emoji = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            logDiv.innerHTML += `<div>[${timestamp}] ${emoji} ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('activityLog').innerHTML = '';
+        }
+
+        async function apiCall(endpoint, method = 'GET', data = null) {
+            try {
+                const options = {
+                    method,
+                    headers: { 'Content-Type': 'application/json' }
+                };
+                
+                if (data) {
+                    options.body = JSON.stringify(data);
+                }
+                
+                const response = await fetch(`${API_BASE}${endpoint}`, options);
+                const result = await response.json();
+                
+                if (result.success) {
+                    log(`${method} ${endpoint}: ${result.message}`, 'success');
+                } else {
+                    log(`${method} ${endpoint}: ${result.error}`, 'error');
+                }
+                
+                return result;
+            } catch (error) {
+                log(`Error en ${endpoint}: ${error.message}`, 'error');
+                return { success: false, error: error.message };
+            }
+        }
+
+        // Audio Device Management
+        async function loadAudioDevices() {
+            const result = await apiCall('/audio/devices');
+            
+            if (result.success && result.data) {
+                const inputSelect = document.getElementById('inputDevices');
+                const outputSelect = document.getElementById('outputDevices');
+                
+                // Clear existing options
+                inputSelect.innerHTML = '<option value="">Seleccionar micrófono...</option>';
+                outputSelect.innerHTML = '<option value="">Seleccionar parlantes...</option>';
+                
+                result.data.forEach(device => {
+                    const option = new Option(
+                        `${device.name} ${device.isDefault ? '(Default)' : ''}`,
+                        device.index
+                    );
+                    
+                    if (device.isInput) {
+                        inputSelect.appendChild(option.cloneNode(true));
+                    }
+                    
+                    if (device.isOutput) {
+                        outputSelect.appendChild(option.cloneNode(true));
+                    }
+                });
+                
+                log(`Encontrados ${result.data.length} dispositivos de audio`, 'success');
+            }
+        }
+
+        async function setInputDevice() {
+            const deviceIndex = document.getElementById('inputDevices').value;
+            if (!deviceIndex) return;
+            
+            await apiCall('/audio/set-input-device', 'POST', { deviceIndex: parseInt(deviceIndex) });
+        }
+
+        async function setOutputDevice() {
+            const deviceIndex = document.getElementById('outputDevices').value;
+            if (!deviceIndex) return;
+            
+            await apiCall('/audio/set-output-device', 'POST', { deviceIndex: parseInt(deviceIndex) });
+        }
+
+        // Audio Control
+        async function startAudioCapture() {
+            await apiCall('/audio/start-capture', 'POST');
+        }
+
+        async function stopAudioCapture() {
+            await apiCall('/audio/stop-capture', 'POST');
+        }
+
+        async function startAudioPlayback() {
+            await apiCall('/audio/start-playback', 'POST');
+        }
+
+        async function stopAudioPlayback() {
+            await apiCall('/audio/stop-playback', 'POST');
+        }
+
+        async function getAudioStatus() {
+            const result = await apiCall('/audio/status');
+            
+            if (result.success && result.data) {
+                const status = result.data;
+                log(`Audio Status: Captura=${status.isCapturing}, Reproducción=${status.isPlaying}, 
+                     Entrada=${status.inputDevice?.name || 'No configurado'}, 
+                     Salida=${status.outputDevice?.name || 'No configurado'}`, 'info');
+            }
+        }
+
+        // Retell AI Call Management
+        async function startCall() {
+            const sessionId = document.getElementById('sessionId').value;
+            const accessToken = document.getElementById('accessToken').value;
+            
+            if (!sessionId || !accessToken) {
+                log('Debe proporcionar ID de sesión y token de acceso', 'error');
+                return;
+            }
+            
+            currentSessionId = sessionId;
+            const result = await apiCall('/start-call', 'POST', {
+                sessionId,
+                accessToken,
+                sampleRate: 16000,
+                emitRawAudioSamples: true
+            });
+            
+            if (result.success) {
+                updateSystemStatus(true);
+            }
+        }
+
+        async function stopCall() {
+            if (!currentSessionId) {
+                log('No hay llamada activa', 'error');
+                return;
+            }
+            
+            await apiCall('/stop-call', 'POST', { sessionId: currentSessionId });
+            currentSessionId = null;
+            updateSystemStatus(false);
+        }
+
+        async function muteCall() {
+            if (!currentSessionId) return;
+            await apiCall('/mute', 'POST', { sessionId: currentSessionId });
+        }
+
+        async function unmuteCall() {
+            if (!currentSessionId) return;
+            await apiCall('/unmute', 'POST', { sessionId: currentSessionId });
+        }
+
+        // WebSocket Management
+        function connectWebSocket() {
+            if (!currentSessionId) {
+                log('Debe iniciar una llamada primero', 'error');
+                return;
+            }
+            
+            if (ws) {
+                ws.close();
+            }
+            
+            ws = new WebSocket(`ws://localhost:8080/ws?sessionId=${currentSessionId}`);
+            
+            ws.onopen = function() {
+                log('WebSocket conectado', 'success');
+                updateWebSocketStatus(true);
+            };
+            
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                log(`WebSocket: ${message.type} - ${JSON.stringify(message).substring(0, 100)}...`, 'info');
+            };
+            
+            ws.onclose = function() {
+                log('WebSocket desconectado');
+                updateWebSocketStatus(false);
+            };
+            
+            ws.onerror = function(error) {
+                log(`Error WebSocket: ${error}`, 'error');
+            };
+        }
+
+        function disconnectWebSocket() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        // UI Updates
+        function updateSystemStatus(connected) {
+            const statusDiv = document.getElementById('systemStatus');
+            const indicator = connected ? 'green' : 'red';
+            const text = connected ? 'Conectado - Llamada Activa' : 'Desconectado';
+            statusDiv.innerHTML = `<div><span class="indicator ${indicator}"></span>${text}</div>`;
+        }
+
+        function updateWebSocketStatus(connected) {
+            const statusDiv = document.getElementById('websocketStatus');
+            const indicator = connected ? 'green' : 'red';
+            const text = connected ? 'Conectado' : 'Desconectado';
+            statusDiv.innerHTML = `<span class="indicator ${indicator}"></span>${text}`;
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', function() {
+            log('Demo de Retell AI Audio iniciado', 'success');
+            loadAudioDevices();
+            
+            // Generate unique session ID
+            document.getElementById('sessionId').value = `demo-session-${Date.now()}`;
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (ws) ws.close();
+        });
+    </script>
+</body>
+</html>

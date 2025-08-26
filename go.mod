@@ -2,7 +2,11 @@ module webrtc-audio-server
 
 go 1.22
 
-require github.com/pion/webrtc/v3 v3.2.43
+require (
+	github.com/gordonklaus/portaudio v0.0.0-20230709114228-aafa478834f5
+	github.com/gorilla/websocket v1.5.1
+	github.com/pion/webrtc/v3 v3.2.43
+)
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -28,4 +32,7 @@ require (
 	golang.org/x/net v0.22.0 // indirect
 	golang.org/x/sys v0.18.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	webrtc-audio-server/retellAI v0.0.0
 )
+
+replace webrtc-audio-server/retellAI => ./retellAI
