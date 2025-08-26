@@ -1,3 +1,5 @@
+//go:build legacy
+
 package main
 
 import (
@@ -7,7 +9,8 @@ import (
 	"time"
 )
 
-func main() {
+// legacyMain is kept for reference; build with -tags legacy to use this older entrypoint.
+func legacyMain() {
 	rand.Seed(time.Now().UnixNano())
 
 	mux := http.NewServeMux()
