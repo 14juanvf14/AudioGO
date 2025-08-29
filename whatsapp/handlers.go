@@ -8,13 +8,12 @@ import (
 	"strings"
 
 	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
 
-	"fmt"
 	"math/rand"
 	"time"
 
 	"webrtc-audio-server/retell"
-
 )
 
 // ========================= Handlers HTTP =========================
@@ -183,7 +182,8 @@ func setupPeerCallbacks(peer *webrtc.PeerConnection, call *Call) {
 				// Buscar el transceiver de audio y activar el envío
 				for _, transceiver := range peer.GetTransceivers() {
 					if transceiver.Kind() == webrtc.RTPCodecTypeAudio && transceiver.Sender().Track() != nil {
-						go startAudioSending(transceiver.Sender().Track(), call.ID)
+						//go startAudioSending(transceiver.Sender().Track(), call.ID)
+						go initAgentCall(transceiver.Sender().Track())
 						break
 					}
 				}
@@ -216,44 +216,133 @@ func setupPeerCallbacks(peer *webrtc.PeerConnection, call *Call) {
 	})
 }
 
-func initAgentCall() {
-		// Inicializar generador de números aleatorios
-		rand.Seed(time.Now().UnixNano())
+func initAgentCall(trackLocal webrtc.TrackLocal) {
+	// Verificar que es una TrackLocalStaticSample para poder enviar audio
+	trackLocalSample, ok := trackLocal.(*webrtc.TrackLocalStaticSample)
+	if !ok {
+		log.Printf("❌ TrackLocal no es del tipo StaticSample, no se puede transmitir audio del agente")
+		return
+	}
 
-		// Cargar configuración desde variables de entorno o usar valores por defecto
-		config := retell.LoadConfig()
-	
-		// Crear una nueva instancia del participante
-		participant := &retell.RoomParticipant{
-			Config:       config,
-			SampleRate:   retell.SampleRate,
-			RemoteTracks: make(map[string]*retell.RemoteAudioTrack),
+	// Inicializar generador de números aleatorios
+	rand.Seed(time.Now().UnixNano())
+
+	// Cargar configuración desde variables de entorno o usar valores por defecto
+	config := retell.LoadConfig()
+
+	// Crear una nueva instancia del participante
+	participant := &retell.RoomParticipant{
+		Config:       config,
+		SampleRate:   retell.SampleRate,
+		RemoteTracks: make(map[string]*retell.RemoteAudioTrack),
+	}
+
+	// Conectar al room
+	if err := participant.Connect(); err != nil {
+		log.Printf("❌ Error conectando al room: %v", err)
+		return
+	}
+
+	// Inicializar audio
+	if err := participant.InitializeAudio(); err != nil {
+		log.Printf("❌ Error inicializando audio: %v", err)
+		return
+	}
+
+	// Configurar el puente de audio del agente hacia el track WebRTC
+	go bridgeAgentAudioToWebRTC(participant, trackLocalSample)
+
+	// Configurar manejo de señales para una desconexión limpia
+	participant.SetupSignalHandling()
+
+	log.Printf("✅ Conectado exitosamente al room de LiveKit y configurado puente de audio")
+}
+
+// bridgeAgentAudioToWebRTC crea un puente entre el audio del agente de Retell y el track WebRTC
+func bridgeAgentAudioToWebRTC(participant *retell.RoomParticipant, trackLocal *webrtc.TrackLocalStaticSample) {
+	log.Printf("🔗 Iniciando puente de audio del agente hacia WebRTC")
+
+	// Buffer para acumular audio del agente
+	audioBuffer := make(chan []byte, 100) // Buffer con capacidad para evitar bloqueos
+
+	// Modificar el participant para que envíe audio a nuestro buffer
+	participant.SetAudioBridgeChannel(audioBuffer)
+
+	// Configuración de audio para WebRTC Opus
+	const (
+		sampleRate      = 48000
+		channels        = 1                     // Mono para voz, más estable
+		frameDuration   = 20 * time.Millisecond // 20ms por frame Opus
+		samplesPerFrame = 960                   // 960 samples para 20ms a 48kHz
+	)
+
+	log.Printf("🎵 Configurando puente de audio: SampleRate=%d, Channels=%d, FrameDuration=%v, SamplesPerFrame=%d",
+		sampleRate, channels, frameDuration, samplesPerFrame)
+
+	// Crear encoder Opus
+	encoder, err := retell.CreateOpusEncoder(sampleRate, channels)
+	if err != nil {
+		log.Printf("❌ Error creando encoder Opus: %v", err)
+		return
+	}
+	// Los encoders de Opus en Go no necesitan destrucción explícita
+
+	// Buffer para acumular muestras PCM
+	pcmBuffer := make([]int16, 0, samplesPerFrame*channels)
+
+	// Procesar audio en bucle
+	for audioData := range audioBuffer {
+		if len(audioData) == 0 {
+			continue
 		}
-	
-		// Conectar al room
-		if err := participant.Connect(); err != nil {
-			log.Fatalf("Error conectando al room: %v", err)
+
+		// Convertir bytes a int16 samples
+		numSamples := len(audioData) / 2
+		samples := make([]int16, numSamples)
+		for i := 0; i < numSamples; i++ {
+			// Little endian decoding
+			samples[i] = int16(audioData[i*2]) | int16(audioData[i*2+1])<<8
 		}
-	
-		// Inicializar audio (simulado para demostración)
-		if err := participant.InitializeAudio(); err != nil {
-			log.Fatalf("Error inicializando audio: %v", err)
+
+		// Acumular muestras en el buffer
+		pcmBuffer = append(pcmBuffer, samples...)
+
+		// Procesar frames completos
+		for len(pcmBuffer) >= samplesPerFrame*channels {
+			// Extraer un frame completo
+			frameData := pcmBuffer[:samplesPerFrame*channels]
+			pcmBuffer = pcmBuffer[samplesPerFrame*channels:]
+
+			// Codificar PCM a Opus
+			opusBuffer := make([]byte, 4000) // Buffer para datos Opus
+			opusLength, err := encoder.Encode(frameData, opusBuffer)
+			if err != nil {
+				log.Printf("⚠️ Error codificando Opus: %v", err)
+				continue
+			}
+
+			if opusLength > 0 {
+				// Extraer solo los datos útiles del buffer
+				opusData := opusBuffer[:opusLength]
+
+				// Enviar datos Opus al track WebRTC
+				sample := media.Sample{
+					Data:     opusData,
+					Duration: frameDuration,
+				}
+
+				if err := trackLocal.WriteSample(sample); err != nil {
+					log.Printf("⚠️ Error enviando audio al track WebRTC: %v", err)
+					continue
+				}
+
+				// Log ocasional para verificar transmisión
+				if time.Now().UnixNano()%1000000000 < 50000000 { // Log cada ~1 segundo aprox
+					log.Printf("🎵 Frame Opus transmitido: %d bytes PCM → %d bytes Opus", len(frameData)*2, len(opusData))
+				}
+			}
 		}
-	
-		// Configurar manejo de señales para una desconexión limpia
-		participant.SetupSignalHandling()
-	
-		fmt.Printf("Conectado exitosamente al room \n")
-		fmt.Println("\n=== FUNCIONALIDADES DE AUDIO ===")
-		fmt.Println("✅ Track de micrófono: Publicado y listo")
-		fmt.Println("✅ Recepción de audio: Configurada para otros participantes")
-		fmt.Println("✅ Gestión de tracks: Automática (conexión/desconexión)")
-		fmt.Println("✅ Envío de audio: Nuevo método desde carpeta static al room LiveKit")
-		fmt.Println("✅ Grabación de audio: Audio entrante guardado en carpeta recorder")
-		fmt.Println("\n📋 Estado actual: MODO LIVEKIT COMPLETO")
-		fmt.Println("   • Track de audio está activo en el room")
-		fmt.Println("   • Enviando audio desde static/ usando nuevo método")
-		fmt.Println("   • Grabando audio entrante en recorder/")
-		fmt.Println("   • Sistema simplificado usando solo LiveKit")
-		fmt.Println("\nPresiona Ctrl+C para desconectar...")
+	}
+
+	log.Printf("🔇 Puente de audio del agente finalizado")
 }

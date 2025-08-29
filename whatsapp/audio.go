@@ -86,7 +86,7 @@ func setupAudioSender(peer *webrtc.PeerConnection, audioTrans *webrtc.RTPTransce
 		webrtc.RTPCodecCapability{
 			MimeType:  webrtc.MimeTypeOpus,
 			ClockRate: 48000,
-			Channels:  2,
+			Channels:  1, // Mono para voz, más estable
 		},
 		"server-audio", "pion",
 	)
@@ -203,7 +203,7 @@ func attachOGGToTransceiver(peer *webrtc.PeerConnection, trans *webrtc.RTPTransc
 		webrtc.RTPCodecCapability{
 			MimeType:  webrtc.MimeTypeOpus,
 			ClockRate: 48000,
-			Channels:  2,
+			Channels:  1, // Mono para voz, más estable
 		},
 		"server-audio", "pion",
 	)

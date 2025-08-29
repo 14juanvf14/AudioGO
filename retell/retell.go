@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,7 +26,7 @@ const (
 	// Configuración de audio
 	SampleRate      = 48000
 	framesPerBuffer = 1024
-	channels        = 2 // Mono
+	channels        = 1 // Mono para voz
 )
 
 type RoomParticipant struct {
@@ -41,6 +43,8 @@ type RoomParticipant struct {
 	decoder      *opus.Decoder
 	oggReader    *oggreader.OggReader
 	oggFile      *os.File
+	// Canal para enviar audio del agente hacia el puente WebRTC
+	audioBridgeChannel chan []byte
 }
 
 type Config struct {
@@ -53,7 +57,6 @@ type RemoteAudioTrack struct {
 	participant string
 	isActive    bool
 }
-
 
 func LoadConfig() Config {
 	return Config{
@@ -180,6 +183,13 @@ func (rp *RoomParticipant) stopAudio() {
 		rp.audioCancel()
 	}
 
+	// Cerrar el canal del puente de audio si existe
+	if rp.audioBridgeChannel != nil {
+		close(rp.audioBridgeChannel)
+		rp.audioBridgeChannel = nil
+		fmt.Println("🔗 Canal de puente de audio cerrado")
+	}
+
 	// Cerrar decoders de tracks remotos
 	for _, remoteTrack := range rp.RemoteTracks {
 		if remoteTrack.decoder != nil {
@@ -287,18 +297,73 @@ func (rp *RoomParticipant) processAudioTrack(remoteTrack *RemoteAudioTrack, trac
 	}
 }
 
-// playAudioBuffer reproduce un buffer de audio PCM (implementación básica)
+// playAudioBuffer reproduce un buffer de audio PCM y lo envía al puente WebRTC si está configurado
 func (rp *RoomParticipant) playAudioBuffer(buffer []float32, remoteTrack *RemoteAudioTrack) {
-	// Esta función se integraría con el callback del outputStream
-	// Por ahora, simplemente marca que hay datos disponibles
 	rp.audioMutex.Lock()
 	remoteTrack.isActive = len(buffer) > 0
+	bridgeChannel := rp.audioBridgeChannel
 	rp.audioMutex.Unlock()
 
-	// Log ocasional para verificar que se está recibiendo audio
 	if len(buffer) > 0 {
-		fmt.Printf("🎵 Reproduciendo %d muestras de audio de %s\n", len(buffer), remoteTrack.participant)
+		// Si hay un canal de puente configurado, enviar el audio como PCM mono
+		if bridgeChannel != nil {
+			// Si el buffer es estéreo, convertir a mono
+			var monoBuffer []float32
+			if len(buffer)%2 == 0 { // Asumir estéreo si es par
+				monoBuffer = make([]float32, len(buffer)/2)
+				for i := 0; i < len(monoBuffer); i++ {
+					// Downmix estéreo a mono (promedio de L+R)
+					left := buffer[i*2]
+					right := buffer[i*2+1]
+					monoBuffer[i] = (left + right) * 0.5
+				}
+			} else {
+				// Ya es mono
+				monoBuffer = buffer
+			}
+
+			// Convertir float32 a int16 PCM (formato estándar de audio)
+			pcmBytes := make([]byte, len(monoBuffer)*2) // 2 bytes por muestra int16
+			for i, sample := range monoBuffer {
+				// Clamp el valor para evitar clipping
+				if sample > 1.0 {
+					sample = 1.0
+				} else if sample < -1.0 {
+					sample = -1.0
+				}
+
+				// Convertir a int16 con rango completo
+				int16Sample := int16(sample * 32767.0)
+
+				// Little endian encoding
+				pcmBytes[i*2] = byte(int16Sample & 0xFF)
+				pcmBytes[i*2+1] = byte((int16Sample >> 8) & 0xFF)
+			}
+
+			// Enviar al canal del puente de forma no bloqueante
+			select {
+			case bridgeChannel <- pcmBytes:
+				// Audio enviado exitosamente al puente
+			default:
+				// Canal lleno, omitir este frame para evitar bloqueos
+				fmt.Printf("⚠️ Canal de puente lleno, omitiendo frame de audio\n")
+			}
+		}
+
+		// Log ocasional para verificar que se está recibiendo audio
+		if len(buffer) > 100 { // Solo log para buffers significativos
+			fmt.Printf("🎵 Procesando %d muestras de audio de %s (original: %d, mono: %d)\n",
+				len(buffer), remoteTrack.participant, len(buffer), len(buffer)/2)
+		}
 	}
+}
+
+// SetAudioBridgeChannel configura el canal para enviar audio del agente hacia el puente WebRTC
+func (rp *RoomParticipant) SetAudioBridgeChannel(channel chan []byte) {
+	rp.audioMutex.Lock()
+	defer rp.audioMutex.Unlock()
+	rp.audioBridgeChannel = channel
+	fmt.Printf("🔗 Canal de puente de audio configurado\n")
 }
 
 func (rp *RoomParticipant) onTrackUnsubscribed(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
@@ -349,84 +414,55 @@ func (rp *RoomParticipant) onDisconnected() {
 
 // setupAudioRecording configura la grabación de audio entrante en formato OGG
 func (rp *RoomParticipant) setupAudioRecording(track *webrtc.TrackRemote, participant *lksdk.RemoteParticipant) {
+	callID := participant.Identity() + "_" + track.ID()
 	timestamp := time.Now().Unix()
-	filename := fmt.Sprintf("recorder_agent_retell/audio-%d.ogg", timestamp)
+	filename := fmt.Sprintf("recorder/retell_agent/audio-%d.ogg", timestamp)
 
-	fmt.Printf("🎙️ Iniciando grabación de audio de %s en: %s\n", participant.Identity(), filename)
+	if track.Kind() != webrtc.RTPCodecTypeAudio {
+		log.Printf(">> Track entrante ignorado (no audio): %s (id=%s)", track.Kind().String(), callID)
+		return
+	}
 
-	go func() {
-		defer func() {
-			fmt.Printf("🔇 Grabación finalizada para %s\n", participant.Identity())
-		}()
+	// Detectar parámetros del codec
+	codec := track.Codec()
+	sampleRate := codec.ClockRate
+	if sampleRate == 0 {
+		sampleRate = 48000 // Fallback
+	}
 
-		// Obtener información del codec del track
-		codec := track.Codec()
-		clockRate := codec.ClockRate
-		channels := codec.Channels
+	channels := 2 // Por defecto stereo
+	// Algunos codecs como Opus pueden ser mono en WebRTC
+	if strings.Contains(strings.ToLower(codec.MimeType), "mono") {
+		channels = 1
+	}
 
-		// Debug detallado del codec
-		debugAudioInfo(codec)
+	log.Printf(">> Codec: %s, SampleRate: %d, Channels: %d (id=%s)",
+		codec.MimeType, sampleRate, channels, callID)
 
-		// Aplicar valores por defecto optimizados para voz (Retell AI)
-		if clockRate == 0 || clockRate > 48000 {
-			clockRate = 48000 // Valor estándar para Opus
-			fmt.Printf("⚠️ ClockRate corregido a %d\n", clockRate)
-		}
-		if channels == 0 || channels > 2 {
-			channels = 1 // Mono es mejor para voz, evita problemas de sincronización
-			fmt.Printf("⚠️ Channels corregido a %d (mono para voz)\n", channels)
-		}
+	cwd, _ := os.Getwd()
+	abs := filepath.Join(cwd, filename)
+	log.Printf(">> Guardando audio en: %s (id=%s)", abs, callID)
 
-		// Para sistemas de voz como Retell, forzar mono siempre
-		if codec.MimeType == "audio/opus" && channels == 2 {
-			channels = 1
-			fmt.Printf("🎙️ Forzando mono para codec de voz (era estéreo)\n")
-		}
+	ogg, err := oggwriter.New(abs, uint32(sampleRate), uint16(channels))
+	if err != nil {
+		log.Printf("error creando ogg: %v (id=%s)", err, callID)
+		return
+	}
+	defer ogg.Close()
 
-		fmt.Printf("📊 Codec detectado: %s, ClockRate: %d, Channels: %d\n",
-			codec.MimeType, clockRate, channels)
-
-		// Crear escritor OGG con la configuración corregida del codec
-		oggWriter, err := createOGGWriter(filename, int(clockRate), int(channels))
+	// Resto del código sin cambios...
+	for {
+		pkt, _, err := track.ReadRTP()
 		if err != nil {
-			fmt.Printf("❌ Error creando escritor OGG: %v\n", err)
+			log.Printf(">> Fin de track: %v (id=%s)", err, callID)
 			return
 		}
-		defer oggWriter.Close()
 
-		fmt.Printf("✅ Grabación OGG activa para %s (Rate: %d, Channels: %d)\n",
-			participant.Identity(), clockRate, channels)
-
-		// Contador para controlar la frecuencia de logs
-		packetCount := 0
-
-		for {
-			// Leer paquete RTP del track remoto
-			rtpPacket, _, err := track.ReadRTP()
-			if err != nil {
-				if err.Error() != "EOF" {
-					fmt.Printf("⚠️ Error leyendo RTP: %v\n", err)
-				}
-				return
-			}
-
-			if rtpPacket != nil {
-				// Escribir paquete RTP al archivo OGG
-				if writeErr := oggWriter.WriteRTP(rtpPacket); writeErr != nil {
-					fmt.Printf("❌ Error escribiendo RTP a OGG: %v\n", writeErr)
-					return
-				}
-
-				packetCount++
-
-				// Log cada 100 paquetes para no saturar
-				if packetCount%100 == 0 {
-					fmt.Printf("💾 Grabando audio RTP de %s (SSRC=%d, Seq=%d, Packets=%d)\n",
-						participant.Identity(), rtpPacket.SSRC, rtpPacket.SequenceNumber, packetCount)
-				}
-			}
+		if writeErr := ogg.WriteRTP(pkt); writeErr != nil {
+			log.Printf("error escribiendo ogg: %v (id=%s)", writeErr, callID)
+			return
 		}
-	}()
+	}
 }
 
 // createOGGWriter crea un escritor OGG para grabar audio
@@ -441,14 +477,21 @@ func createOGGWriter(filename string, sampleRate int, channels int) (*oggwriter.
 	return writer, nil
 }
 
-// debugAudioInfo imprime información detallada del audio para debugging
-func debugAudioInfo(codec webrtc.RTPCodecParameters) {
-	fmt.Printf("🔍 DEBUG CODEC INFO:\n")
-	fmt.Printf("   MimeType: %s\n", codec.MimeType)
-	fmt.Printf("   ClockRate: %d Hz\n", codec.ClockRate)
-	fmt.Printf("   Channels: %d\n", codec.Channels)
-	fmt.Printf("   PayloadType: %d\n", codec.PayloadType)
-	if len(codec.SDPFmtpLine) > 0 {
-		fmt.Printf("   FMTP: %s\n", codec.SDPFmtpLine)
+
+
+// CreateOpusEncoder crea un encoder Opus optimizado para voz
+func CreateOpusEncoder(sampleRate int, channels int) (*opus.Encoder, error) {
+	encoder, err := opus.NewEncoder(sampleRate, channels, opus.AppVoIP)
+	if err != nil {
+		return nil, fmt.Errorf("error creando encoder Opus: %w", err)
 	}
+
+	// Configuración optimizada para voz en tiempo real
+	encoder.SetBitrate(64000)  // 64kbps, buena calidad para voz
+	encoder.SetComplexity(5)   // Compromiso entre calidad y latencia
+	encoder.SetDTX(false)      // Desactivar DTX para consistencia
+	encoder.SetInBandFEC(true) // Activar corrección de errores
+
+	fmt.Printf("✅ Encoder Opus creado: %dHz, %d canales, 64kbps, optimizado para voz\n", sampleRate, channels)
+	return encoder, nil
 }
