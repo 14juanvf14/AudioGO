@@ -1,2 +1,6 @@
 #ignora todos los archivos que inicien por "audio-"
 audio-*
+
+socket_server/node_modules
+socket_server/package-lock.json
+socket_server/dist
